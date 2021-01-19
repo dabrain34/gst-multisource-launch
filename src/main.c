@@ -137,45 +137,6 @@ change_player_state (GstMultiSource * thiz, GstState state)
       break;
   }
 }
-static gint
-select_decodebin3_stream_cb (GstElement * decodebin,
-    GstStreamCollection * collection, GstStream * stream,
-    GstMultiSource * thiz)
-{
-  GstStreamType stype = gst_stream_get_stream_type (stream);
-  /* select all the streams if stream_selected = 0*/
-  if(thiz->streams_selected == 0)
-    return -1;
-  if (stype == GST_STREAM_TYPE_VIDEO
-      && (thiz->streams_selected & GST_STREAM_TYPE_VIDEO))
-    return 1;
-  else if (stype == GST_STREAM_TYPE_AUDIO
-      && (thiz->streams_selected & GST_STREAM_TYPE_AUDIO))
-    return 1;
-  else
-    return 0;
-}
-
-static void
-connect_select_stream_decodebin3(const GValue * item, gpointer user_data)
-{
-  GstElement *element = g_value_get_object (item);
-  if (g_str_has_prefix (GST_ELEMENT_NAME (element), "decodebin3")) {
-      g_signal_connect (element, "select-stream",
-            G_CALLBACK (select_decodebin3_stream_cb), (GstMultiSource *) user_data);
-  }
-}
-
-static void
-add_select_stream_to_decodebin3 (GstMultiSource *thiz)
-{
-  GstIterator *it = gst_bin_iterate_recurse (GST_BIN (thiz->pipeline));
-
-  while (gst_iterator_foreach (it, connect_select_stream_decodebin3,
-                               thiz) == GST_ITERATOR_RESYNC)
-    gst_iterator_resync (it);
-  gst_iterator_free (it);
-}
 
 static gboolean
 message_cb (GstBus * bus, GstMessage * message, gpointer user_data)
@@ -216,6 +177,56 @@ message_cb (GstBus * bus, GstMessage * message, gpointer user_data)
       g_error_free (err);
       g_free (debug);
       g_free (name);
+      break;
+    }
+    case GST_MESSAGE_STREAM_COLLECTION:
+    {
+      gint i;
+      GList *selected_streams = NULL;
+      GstStreamCollection *collection;
+      gint n_video_streams = 0;
+      gint n_audio_streams = 0;
+
+      gst_message_parse_stream_collection (message, &collection);
+      /* Check the stream selection provided and select only video or audio. Only the first stream is selected.*/
+      for (i = 0; i < gst_stream_collection_get_size (collection); i++) {
+        GstStream *stream = gst_stream_collection_get_stream (collection, i);
+        GstStreamType stype = gst_stream_get_stream_type (stream);
+        if ((stype == GST_STREAM_TYPE_VIDEO
+            && (thiz->streams_selected & GST_STREAM_TYPE_VIDEO) && (n_video_streams < 1))
+            ||(stype == GST_STREAM_TYPE_AUDIO
+                && (thiz->streams_selected & GST_STREAM_TYPE_AUDIO) && (n_audio_streams < 1))) {
+
+          if (stype == GST_STREAM_TYPE_VIDEO)
+            n_video_streams ++;
+          if (stype == GST_STREAM_TYPE_AUDIO)
+            n_audio_streams ++;
+          selected_streams =
+              g_list_append (selected_streams,
+              (gchar *) gst_stream_get_stream_id (stream));
+        }
+      }
+      /* If streams are selected above, the list is passed to decodebin3 to select exclusively the streams and disable
+       * the others. For example in video only, the audio stream(s) will be disabled and no decoder elements
+       * will be instanciated by decodebin3.
+       */
+      if (selected_streams) {
+        GstElement *element = GST_ELEMENT (GST_MESSAGE_SRC (message));
+        /* HACK when decodebin is not the source of the message */
+        if (!g_str_has_prefix (GST_ELEMENT_NAME (element), "decodebin")) {
+          if (g_str_has_prefix (GST_ELEMENT_NAME (element), "parsebin"))
+            element = GST_ELEMENT (GST_OBJECT_PARENT(GST_MESSAGE_SRC (message)));
+          else
+            PRINT ("Error the element should be parsebin or decodebin3.");
+        }
+        PRINT ("About to send the event to %s", GST_ELEMENT_NAME (element));
+        gst_element_send_event (element,
+            gst_event_new_select_streams (selected_streams));
+        g_list_free (selected_streams);
+      }
+      GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS (GST_BIN (thiz->pipeline),
+          GST_DEBUG_GRAPH_SHOW_ALL, "gst-multisource-launch.stream-collection");
+
       break;
     }
     case GST_MESSAGE_EOS:
@@ -474,7 +485,6 @@ main (int argc, char **argv)
         thiz->pipeline_description, err->message);
     goto done;
   }
-  add_select_stream_to_decodebin3(thiz);
 
   bus = gst_pipeline_get_bus (GST_PIPELINE (thiz->pipeline));
   g_signal_connect (G_OBJECT (bus), "message", G_CALLBACK (message_cb), thiz);
@@ -503,8 +513,6 @@ main (int argc, char **argv)
       g_unix_signal_add (SIGINT, (GSourceFunc) intr_handler, thiz);
 #endif
   g_main_loop_run (thiz->loop);
-
-  /* No need to see all those pad caps going to NULL etc., it's just noise */
 
 done:
   if (thiz->loop)
