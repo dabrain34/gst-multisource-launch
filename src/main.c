@@ -26,6 +26,9 @@
 #include <glib-unix.h>
 #endif
 
+GST_DEBUG_CATEGORY (multisource_launch_debug);
+#define GST_CAT_DEFAULT multisource_launch_debug
+
 #define DEFAULT_MUXER "multipartmux"
 #define DEFAULT_SINK "fakesink"
 
@@ -95,20 +98,20 @@ set_player_state (GstMultiSource * thiz, GstState state)
 
   switch (ret) {
     case GST_STATE_CHANGE_FAILURE:
-      PRINT ("ERROR: pipeline doesn't want to pause.");
+      GST_DEBUG ("ERROR: pipeline doesn't want to pause.");
       res = FALSE;
       break;
     case GST_STATE_CHANGE_NO_PREROLL:
-      PRINT ("pipeline is live and does not need PREROLL ...");
+      GST_DEBUG ("pipeline is live and does not need PREROLL ...");
       thiz->is_live = TRUE;
       break;
     case GST_STATE_CHANGE_ASYNC:
-      PRINT ("pipeline is PREROLLING ...");
+      GST_DEBUG ("pipeline is PREROLLING ...");
       break;
       /* fallthrough */
     case GST_STATE_CHANGE_SUCCESS:
       if (thiz->state == GST_STATE_PAUSED)
-        PRINT ("pipeline is PREROLLED ...");
+        GST_DEBUG ("pipeline is PREROLLED ...");
       break;
   }
   return res;
@@ -142,7 +145,7 @@ static gboolean
 message_cb (GstBus * bus, GstMessage * message, gpointer user_data)
 {
   GstMultiSource *thiz = (GstMultiSource *) user_data;
-  PRINT ("Received new message %s from %s",
+  GST_DEBUG ("Received new message %s from %s",
       GST_MESSAGE_TYPE_NAME (message), GST_OBJECT_NAME (message->src));
   switch (GST_MESSAGE_TYPE (message)) {
     case GST_MESSAGE_ERROR:{
@@ -212,18 +215,19 @@ message_cb (GstBus * bus, GstMessage * message, gpointer user_data)
        */
       if (selected_streams) {
         GstElement *element = GST_ELEMENT (GST_MESSAGE_SRC (message));
-        /* HACK when decodebin is not the source of the message */
+        /* HACK when decodebin is not the source of the message. Bugfix: https://gitlab.freedesktop.org/gstreamer/gst-plugins-base/-/merge_requests/1014*/
         if (!g_str_has_prefix (GST_ELEMENT_NAME (element), "decodebin")) {
           if (g_str_has_prefix (GST_ELEMENT_NAME (element), "parsebin"))
             element = GST_ELEMENT (GST_OBJECT_PARENT(GST_MESSAGE_SRC (message)));
           else
-            PRINT ("Error the element should be parsebin or decodebin3.");
+            GST_WARNING ("Error the element should be parsebin or decodebin3.");
         }
-        PRINT ("About to send the event to %s", GST_ELEMENT_NAME (element));
+        GST_DEBUG ("About to send the event to %s", GST_ELEMENT_NAME (element));
         gst_element_send_event (element,
             gst_event_new_select_streams (selected_streams));
         g_list_free (selected_streams);
       }
+
       GST_DEBUG_BIN_TO_DOT_FILE_WITH_TS (GST_BIN (thiz->pipeline),
           GST_DEBUG_GRAPH_SHOW_ALL, "gst-multisource-launch.stream-collection");
 
@@ -319,7 +323,7 @@ message_cb (GstBus * bus, GstMessage * message, gpointer user_data)
         val_str = g_strdup ("(no value)");
       }
 
-      PRINT ("%s: %s = %s", obj_name, name, val_str);
+      GST_DEBUG ("%s: %s = %s", obj_name, name, val_str);
       g_free (obj_name);
       g_free (val_str);
       break;
@@ -387,7 +391,7 @@ void
 usage ()
 {
   PRINT ("Available commands:\n"
-      "  p - Toggle between Play and Pause\n" "  q - Quit");
+      "  p - Toggle between Play and Pause\n" "  q - Quit\n  s - Snapshot dot");
 }
 
 int
@@ -442,20 +446,23 @@ main (int argc, char **argv)
   g_option_context_add_group (ctx, gst_init_get_option_group ());
 
   if (!g_option_context_parse (ctx, &argc, &argv, &err)) {
-    GST_ERROR ("Error initializing: %s\n", GST_STR_NULL (err->message));
+    PRINT ("Error initializing: %s\n", GST_STR_NULL (err->message));
     res = -1;
     goto done;
   }
   g_option_context_free (ctx);
   thiz->interactive = interactive;
   thiz->verbose = verbose;
+  GST_DEBUG_CATEGORY_INIT (multisource_launch_debug, "multisource-launch", 0,
+      "gst-multisource-launch");
+
   if (audio_only)
     thiz->streams_selected |= GST_STREAM_TYPE_AUDIO;
   if (video_only)
     thiz->streams_selected |= GST_STREAM_TYPE_VIDEO;
 
   if (!full_branch_desc_array) {
-    g_printerr ("Usage: %s -s rtsp_source \n", argv[0]);
+    PRINT ("Usage: %s -s rtsp_source \n", argv[0]);
     goto done;
   }
   if (muxer)
